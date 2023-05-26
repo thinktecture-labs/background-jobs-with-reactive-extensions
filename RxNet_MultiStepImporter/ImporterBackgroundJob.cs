@@ -54,56 +54,26 @@ public class ImporterBackgroundJob : IDisposable
 
    private IObservable<Unit> ImportDataFromFtp(long importId)
    {
-      return Observable.Return(Unit.Default)
+      // the "Importer" is immutable and thread-safe
+
+      return Observable.Defer(() => Observable.Return(new Importer(importId)))
                        .Do(_ => Console.WriteLine($"[{importId}] ==> Starting import"))
-                       .SelectMany(_ => FetchSupplierFtpInfos(importId))
-                       .SelectAsync((ftpInfo, token) => DownloadFileAsync(ftpInfo, token))
-                       .Merge(_maxConcurrentDownloads) // degree of parallelism for downloads: 5
-                       .SelectAsync((file, token) => ParseAsync(file, token))
-                       .Merge(_maxConcurrentParsings) // degree of parallelism for parsing: 3
-                       .ToList()                      // collect all results to pass them to SaveToDatabaseAsync all at once
-                       .Where(d => d.Count > 0)       // ignore
-                       .SelectManyAsync((data, token) => SaveToDatabaseAsync(importId, data, token))
+                       .SelectMany(importer => importer.FetchSupplierFtpInfos()
+                                                       .ToObservable()
+                                                       .SelectAsync((ftpInfo, token) => importer.DownloadFileAsync(ftpInfo, token))
+                                                       .Merge(_maxConcurrentDownloads) // degree of parallelism for downloads: 5
+                                                       .SelectAsync((file, token) => importer.ParseAsync(file, token))
+                                                       .Merge(_maxConcurrentParsings) // degree of parallelism for parsing: 3
+                                                       .ToList()                      // collect all results to pass them to SaveToDatabaseAsync all at once
+                                                       .Where(d => d.Count > 0)       // ignore
+                                                       .SelectManyAsync((data, token) => importer.SaveToDatabaseAsync(data, token))
+                                  )
                        .Do(_ => Console.WriteLine($"[{importId}] <== Import finished"))
                        .Catch<Unit, Exception>(ex =>
                                                {
                                                   Console.WriteLine($"[{importId}] <== Import cancelled due to '{ex.GetType().Name}: {ex.Message}'");
                                                   return Observable.Empty<Unit>();
                                                });
-   }
-
-   private List<FtpInfo> FetchSupplierFtpInfos(long importId)
-   {
-      Console.WriteLine($"[{importId}] Fetching FTP infos.");
-
-      return Enumerable.Range(1, 7)
-                       .Select(id => new FtpInfo(importId, id))
-                       .ToList();
-   }
-
-   private async Task<FtpFile> DownloadFileAsync(FtpInfo ftpInfo, CancellationToken cancellationToken)
-   {
-      Console.WriteLine($"[{ftpInfo.ImportId}] Downloading file from supplier '{ftpInfo.SupplierId}'");
-      await Task.Delay(1500, cancellationToken);
-      Console.WriteLine($"[{ftpInfo.ImportId}]  Downloaded file from supplier '{ftpInfo.SupplierId}'.");
-
-      return new FtpFile(ftpInfo.ImportId, ftpInfo.SupplierId);
-   }
-
-   private async Task<Data> ParseAsync(FtpFile file, CancellationToken cancellationToken)
-   {
-      Console.WriteLine($"[{file.ImportId}] Parsing file of supplier '{file.SupplierId}'.");
-      await Task.Delay(1000, cancellationToken);
-      Console.WriteLine($"[{file.ImportId}]  Parsed file of supplier '{file.SupplierId}'.");
-
-      return new Data(file.SupplierId);
-   }
-
-   private async Task SaveToDatabaseAsync(long importId, IList<Data> data, CancellationToken cancellationToken)
-   {
-      Console.WriteLine($"[{importId}] Saving data to database. Suppliers: {String.Join(", ", data.Select(d => d.SupplierId))}.");
-      await Task.Delay(200, cancellationToken);
-      Console.WriteLine($"[{importId}]  Saved data to database. Suppliers: {String.Join(", ", data.Select(d => d.SupplierId))}.");
    }
 
    public void Dispose()
