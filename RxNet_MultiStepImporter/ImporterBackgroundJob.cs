@@ -1,4 +1,5 @@
 using System.Reactive;
+using System.Reactive.Disposables;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
 
@@ -65,7 +66,7 @@ public class ImporterBackgroundJob : IDisposable
                                                        .SelectAsync((file, token) => importer.ParseAsync(file, token))
                                                        .Merge(_maxConcurrentParsings) // degree of parallelism for parsing: 3
                                                        .ToList()                      // collect all results to pass them to SaveToDatabaseAsync all at once
-                                                       .Where(d => d.Count > 0)       // ignore
+                                                       .Where(d => d.Count > 0)       // ignore empty collections
                                                        .SelectManyAsync((data, token) => importer.SaveToDatabaseAsync(data, token))
                                   )
                        .Do(_ => Console.WriteLine($"[{importId}] <== Import finished"))
@@ -74,6 +75,48 @@ public class ImporterBackgroundJob : IDisposable
                                                   Console.WriteLine($"[{importId}] <== Import cancelled due to '{ex.GetType().Name}: {ex.Message}'");
                                                   return Observable.Empty<Unit>();
                                                });
+   }
+
+   // "classic" approach
+   private IObservable<Unit> ImportDataFromFtp2(long importId)
+   {
+      return Observable.Create<Unit>(async (observer, token) =>
+                                     {
+                                        try
+                                        {
+                                           await ImportDataFromFtpAsync(importId, token);
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                           Console.WriteLine($"[{importId}] <== Import cancelled due to '{ex.GetType().Name}: {ex.Message}'");
+                                        }
+                                        finally
+                                        {
+                                           observer.OnCompleted();
+                                        }
+
+                                        return Disposable.Empty;
+                                     });
+   }
+
+   private static async Task ImportDataFromFtpAsync(long importId, CancellationToken token)
+   {
+      var importer = new Importer(importId);
+      Console.WriteLine($"[{importId}] ==> Starting import");
+
+      var dataTasks = importer.FetchSupplierFtpInfos()
+                              .Select(async ftpInfo =>
+                                      {
+                                         var file = await importer.DownloadFileAsync(ftpInfo, token);
+                                         return await importer.ParseAsync(file, token);
+                                      });
+
+      var data = await Task.WhenAll(dataTasks);
+
+      if (data.Length > 0)
+         await importer.SaveToDatabaseAsync(data, token);
+
+      Console.WriteLine($"[{importId}] <== Import finished");
    }
 
    public void Dispose()
